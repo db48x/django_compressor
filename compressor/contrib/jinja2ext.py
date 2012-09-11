@@ -3,8 +3,9 @@ from jinja2.ext import Extension
 from jinja2.exceptions import TemplateSyntaxError
 from compressor.exceptions import OfflineGenerationError
 from compressor.templatetags.compress import OUTPUT_FILE, CompressorMixin
-from compressor.cache import (get_offline_hexdigest, 
+from compressor.cache import (get_offline_hexdigest,
                              get_offline_manifest)
+
 
 class CompressorExtension(CompressorMixin, Extension):
 
@@ -31,7 +32,7 @@ class CompressorExtension(CompressorMixin, Extension):
             args.append(nodes.Const('file'))
         args.append(nodes.ContextReference())
         body = parser.parse_statements(['name:endcompress'], drop_needle=True)
-        return nodes.CallBlock(self.call_method('_compress', args), [], [], 
+        return nodes.CallBlock(self.call_method('_compress', args), [], [],
             body).set_lineno(lineno)
 
     def _compress(self, kind, mode, context, caller):
@@ -40,13 +41,13 @@ class CompressorExtension(CompressorMixin, Extension):
 
         mode = mode or OUTPUT_FILE
         original_content = caller()
-        context = { 
+        context = {
             'original_content': original_content
-        }   
+        }
         return self.render_compressed(context, kind, mode, forced=forced)
 
     def render_offline(self, context, forced):
-        """ 
+        """
         If enabled and in offline mode, and not forced check the offline cache
         and return the result if given
         """
