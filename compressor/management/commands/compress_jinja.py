@@ -1,7 +1,11 @@
 # flake8: noqa
 import sys
+from compressor.contrib.jinja2ext import CompressorExtension
 import jinja2
-from jinja2.nodes import CallBlock, Call, ExtensionAttribute
+import jinja2.meta
+from jinja2 import Template
+from jinja2.nodes import CallBlock, Call, ExtensionAttribute, If, Extends
+from jinja2.exceptions import TemplateSyntaxError
 from types import MethodType
 from optparse import make_option
 
@@ -11,12 +15,8 @@ except ImportError:
     from StringIO import StringIO  # noqa
 
 from django.core.management.base import NoArgsCommand, CommandError
-from coffin.template import (Context, Template)
-from jinja2.exceptions import TemplateSyntaxError
 from django.template import (TemplateDoesNotExist)
 from django.utils.datastructures import SortedDict
-from django.template.loader_tags import (ExtendsNode,
-                                         BLOCK_CONTEXT_KEY)
 
 try:
     from django.template.loaders.cached import Loader as CachedLoader
@@ -27,79 +27,6 @@ from compressor.cache import get_offline_hexdigest, write_offline_manifest
 from compressor.conf import settings
 from compressor.exceptions import OfflineGenerationError
 from compressor.templatetags.compress import CompressorNode
-
-
-def patched_render(self, context):
-    # 'Fake' _render method that just returns the context instead of
-    # rendering. It also checks whether the first node is an extend node or
-    # not, to be able to handle complex inheritance chain.
-    self._render_firstnode = MethodType(patched_render_firstnode, self)
-    self._render_firstnode(context)
-
-    # Cleanup, uninstall our _render monkeypatch now that it has been called
-    self._render = self._old_render
-    return context
-
-
-def patched_render_firstnode(self, context):
-    # If this template has a ExtendsNode, we want to find out what
-    # should be put in render_context to make the {% block ... %}
-    # tags work.
-    #
-    # We can't fully render the base template(s) (we don't have the
-    # full context vars - only what's necessary to render the compress
-    # nodes!), therefore we hack the ExtendsNode we found, patching
-    # its get_parent method so that rendering the ExtendsNode only
-    # gives us the blocks content without doing any actual rendering.
-    extra_context = {}
-    try:
-        firstnode = self.nodelist[0]
-    except IndexError:
-        firstnode = None
-    if isinstance(firstnode, ExtendsNode):
-        firstnode._log = self._log
-        firstnode._log_verbosity = self._log_verbosity
-        firstnode._old_get_parent = firstnode.get_parent
-        firstnode.get_parent = MethodType(patched_get_parent, firstnode)
-        try:
-            extra_context = firstnode.render(context)
-            context.render_context = extra_context.render_context
-            # We aren't rendering {% block %} tags, but we want
-            # {{ block.super }} inside {% compress %} inside {% block %}s to
-            # work. Therefore, we need to pop() the last block context for
-            # each block name, to emulate what would have been done if the
-            # {% block %} had been fully rendered.
-            for blockname in firstnode.blocks.keys():
-                context.render_context[BLOCK_CONTEXT_KEY].pop(blockname)
-        except (IOError, TemplateSyntaxError, TemplateDoesNotExist):
-            # That first node we are trying to render might cause more errors
-            # that we didn't catch when simply creating a Template instance
-            # above, so we need to catch that (and ignore it, just like above)
-            # as well.
-            if self._log_verbosity > 0:
-                self._log.write("Caught error when rendering extend node from "
-                                "template %s\n" % getattr(self, 'name', self))
-            return None
-        finally:
-            # Cleanup, uninstall our get_parent monkeypatch now that it has
-            # been called
-            firstnode.get_parent = firstnode._old_get_parent
-    return extra_context
-
-
-def patched_get_parent(self, context):
-    # Patch template returned by extendsnode's get_parent to make sure their
-    # _render method is just returning the context instead of actually
-    # rendering stuff.
-    # In addition, this follows the inheritance chain by looking if the first
-    # node of the template is an extend node itself.
-    compiled_template = self._old_get_parent(context)
-    compiled_template._log = self._log
-    compiled_template._log_verbosity = self._log_verbosity
-    compiled_template._old_render = compiled_template._render
-    compiled_template._render = MethodType(patched_render, compiled_template)
-    return compiled_template
-
 
 class Command(NoArgsCommand):
     help = "Compress content outside of the request/response cycle"
@@ -174,7 +101,8 @@ class Command(NoArgsCommand):
             raise OfflineGenerationError("No template loaders defined. You "
                                          "must set TEMPLATE_LOADERS in your "
                                          "settings.")
-        from coffin.common import env
+        env = jinja2.Environment(loader=jinja2.FileSystemLoader(settings.TEMPLATE_DIRS),
+                                 extensions=[CompressorExtension])
         templates = env.list_templates()
 
         if not templates:
@@ -226,22 +154,21 @@ class Command(NoArgsCommand):
         results = []
         offline_manifest = SortedDict()
         for template, nodes in compressor_nodes.iteritems():
-            context = Context(settings.COMPRESS_OFFLINE_CONTEXT)
+            context = settings.COMPRESS_OFFLINE_CONTEXT
+            context['compress_forced'] = True
             template._log = log
             template._log_verbosity = verbosity
             for node in nodes:
-                context.push()
-                compiled_node = env.compile(jinja2.nodes.Template(node.body))
-                key = get_offline_hexdigest(Template.from_code(env, compiled_node, {}).render(context))
+                compiled_body = env.compile(jinja2.nodes.Template(node.body))
+                key = get_offline_hexdigest(Template.from_code(env, compiled_body, {}).render(context))
                 try:
-                    context['compress_forced'] = True
                     compiled_node = env.compile(jinja2.nodes.Template([node]))
                     result = Template.from_code(env, compiled_node, {}).render(context)
+                    print("%s:%s = %s" % (template.template_name, node.lineno, result))
                 except Exception, e:
                     raise CommandError("An error occured during rendering %s: "
                                        "%s" % (template.template_name, e))
                 offline_manifest[key] = result
-                context.pop()
                 results.append(result)
                 count += 1
 
@@ -252,7 +179,7 @@ class Command(NoArgsCommand):
         return count, results
 
     def get_nodelist(self, node):
-        if (isinstance(node, IfNode) and
+        if (isinstance(node, If) and
                 hasattr(node, 'nodelist_true') and
                 hasattr(node, 'nodelist_false')):
             return node.nodelist_true + node.nodelist_false
