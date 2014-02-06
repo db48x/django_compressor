@@ -102,7 +102,7 @@ class Command(NoArgsCommand):
                                          "must set TEMPLATE_LOADERS in your "
                                          "settings.")
         env = jinja2.Environment(loader=jinja2.FileSystemLoader(settings.TEMPLATE_DIRS),
-                                 extensions=[CompressorExtension])
+                                 extensions=[CompressorExtension, jinja2.ext.WithExtension])
         templates = env.list_templates()
 
         if not templates:
